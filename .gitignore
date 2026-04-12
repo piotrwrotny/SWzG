@@ -5,7 +5,8 @@ __pycache__/
 
 # github folder
 .github/
-
+docs/
+docs/**
 .github/**
 
 # C extensions

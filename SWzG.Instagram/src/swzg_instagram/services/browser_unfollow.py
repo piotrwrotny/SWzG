@@ -164,11 +164,12 @@ class BrowserUnfollowService:
         self, page: Page, targets: set[str],
     ) -> list[ActionResult]:
         results: list[ActionResult] = []
-        processed: set[str] = set()
         remaining = set(targets)
-        failed: set[str] = set()
-        scroll_attempts_without_new = 0
+        seen_usernames: set[str] = set()
+        idle_scrolls = 0
         max_idle_scrolls = 15
+        own = self._instagram_username.lower()
+        total = len(targets)
 
         dialog = page.locator("div[role='dialog']").first
         if dialog.count() == 0:
@@ -179,65 +180,39 @@ class BrowserUnfollowService:
             len(remaining),
         )
 
-        while remaining and scroll_attempts_without_new < max_idle_scrolls:
-            found_new = False
-            did_action = False
+        while remaining and idle_scrolls < max_idle_scrolls:
+            # --- single JS call: scan all visible rows, return usernames ---
+            visible = self._scan_visible_usernames(dialog)
+            new_found = False
 
-            # a.notranslate targets only the username text links
-            # (avatar links use different classes and are not .notranslate)
-            username_links = dialog.locator("a.notranslate")
-            count = username_links.count()
+            for username in visible:
+                if username == own or username in seen_usernames:
+                    continue
+                seen_usernames.add(username)
+                new_found = True
 
-            for idx in range(count):
-                try:
-                    link = username_links.nth(idx)
-                    href = link.get_attribute("href", timeout=2000)
-                    if not href:
-                        continue
-                    username = href.strip("/").split("/")[0].lower()
-
-                    if username in processed or username == self._instagram_username.lower():
-                        continue
-                    processed.add(username)
-                    found_new = True
-
-                    if username not in remaining or username in failed:
-                        continue
-
-                    result = self._unfollow_user_in_dialog(page, link, username)
-                    results.append(result)
-                    if result.status == ActionStatus.SUCCESS:
-                        remaining.discard(username)
-                        print(
-                            f"  [{len(targets) - len(remaining)}/{len(targets)}] "
-                            f"Odobserwowano @{username}"
-                        )
-                    else:
-                        failed.add(username)
-                        remaining.discard(username)
-                        print(
-                            f"  [{len(targets) - len(remaining)}/{len(targets)}] "
-                            f"Nie udało się: @{username}"
-                        )
-
-                    time.sleep(self._min_delay)
-                    # DOM changes after unfollow — re-query on next pass
-                    did_action = True
-                    break
-                except Exception as exc:
-                    logger.debug("Błąd wiersza %d: %s", idx, exc)
+                if username not in remaining:
                     continue
 
-            if did_action:
-                scroll_attempts_without_new = 0
-                continue
+                # --- unfollow this user ---
+                result = self._click_unfollow(page, dialog, username)
+                results.append(result)
+                remaining.discard(username)
 
-            if found_new:
-                scroll_attempts_without_new = 0
+                done = total - len(remaining)
+                if result.status == ActionStatus.SUCCESS:
+                    print(f"  [{done}/{total}] Odobserwowano @{username}")
+                else:
+                    print(f"  [{done}/{total}] Pominięto @{username}: {result.message}")
+
+                time.sleep(POST_UNFOLLOW_DELAY)
+
+            if new_found:
+                idle_scrolls = 0
             else:
-                scroll_attempts_without_new += 1
+                idle_scrolls += 1
 
-            # Scroll the list inside the dialog to load more accounts
+            # Scroll to load more
             try:
                 dialog.evaluate("""
                     (dlg) => {
@@ -252,9 +227,8 @@ class BrowserUnfollowService:
 
         if remaining:
             actions_logger.warning(
-                "Nie znaleziono %d kont na liście obserwowanych: %s",
-                len(remaining),
-                ", ".join(sorted(remaining)),
+                "Nie znaleziono %d kont na liście: %s",
+                len(remaining), ", ".join(sorted(remaining)),
             )
             for username in remaining:
                 results.append(ActionResult(
@@ -266,95 +240,96 @@ class BrowserUnfollowService:
 
         return results
 
-    def _unfollow_user_in_dialog(
-        self,
-        page: Page,
-        user_link: object,
-        username: str,
-    ) -> ActionResult:
-        try:
-            actions_logger.info("Odobserwowuję @%s przez przeglądarkę", username)
+    # ------------------------------------------------------------------
+    # Fast helpers — minimise Python↔browser round-trips
+    # ------------------------------------------------------------------
 
-            # Walk up from the username link to the nearest ancestor
-            # that contains a <button> element, then read its text.
-            button_text = user_link.evaluate("""
-                (link) => {
-                    let el = link.parentElement;
-                    while (el) {
-                        const btn = el.querySelector('button');
-                        if (btn) return btn.textContent.trim();
-                        el = el.parentElement;
+    @staticmethod
+    def _scan_visible_usernames(dialog: object) -> list[str]:
+        """Return all usernames currently rendered in the dialog (single JS call)."""
+        return dialog.evaluate("""
+            (dlg) => {
+                const links = dlg.querySelectorAll('a.notranslate');
+                const names = [];
+                for (const a of links) {
+                    const href = a.getAttribute('href');
+                    if (href) names.push(href.replace(/\\//g, '').split('/')[0].toLowerCase());
+                }
+                return names;
+            }
+        """)
+
+    @staticmethod
+    def _click_unfollow(
+        page: Page, dialog: object, username: str,
+    ) -> ActionResult:
+        """Find the row for *username*, click the button, confirm the popup."""
+        try:
+            actions_logger.info("Odobserwowuję @%s", username)
+
+            # One JS call: find the link, walk up to the row's button, click it.
+            btn_text = dialog.evaluate(
+                """
+                (dlg, args) => {
+                    const [uname, allowed] = args;
+                    const pat = new RegExp(allowed, 'i');
+                    const links = dlg.querySelectorAll('a.notranslate');
+                    for (const a of links) {
+                        const href = (a.getAttribute('href') || '').replace(/\\//g, '');
+                        if (href.toLowerCase() !== uname) continue;
+                        let el = a.parentElement;
+                        while (el && el !== dlg) {
+                            const btn = el.querySelector('button');
+                            if (btn) {
+                                const txt = btn.textContent.trim();
+                                if (pat.test(txt)) { btn.click(); return txt; }
+                                return 'WRONG:' + txt;
+                            }
+                            el = el.parentElement;
+                        }
+                        return null;
                     }
                     return null;
                 }
-            """)
+                """,
+                [username, FOLLOWING_BUTTON_TEXTS_JS],
+            )
 
-            if not button_text:
-                actions_logger.warning(
-                    "Nie znaleziono przycisku dla @%s", username,
-                )
+            if btn_text is None:
+                actions_logger.warning("Nie znaleziono przycisku dla @%s", username)
                 return ActionResult(
-                    username=username,
-                    status=ActionStatus.FAILED,
-                    message="Nie znaleziono przycisku",
-                    step="browser_unfollow",
+                    username=username, status=ActionStatus.FAILED,
+                    message="Nie znaleziono przycisku", step="browser_unfollow",
                 )
 
-            if button_text.lower() not in FOLLOWING_BUTTON_TEXTS:
-                actions_logger.warning(
-                    "Przycisk dla @%s: '%s' — nie rozpoznano jako 'Obserwowanie'",
-                    username, button_text,
-                )
+            if btn_text.startswith("WRONG:"):
+                label = btn_text[6:]
+                actions_logger.warning("Przycisk @%s: '%s'", username, label)
                 return ActionResult(
-                    username=username,
-                    status=ActionStatus.SKIPPED,
-                    message=f"Przycisk: '{button_text}'",
-                    step="browser_unfollow",
+                    username=username, status=ActionStatus.SKIPPED,
+                    message=f"Przycisk: '{label}'", step="browser_unfollow",
                 )
 
-            # Click the following button via JS
-            user_link.evaluate("""
-                (link) => {
-                    let el = link.parentElement;
-                    while (el) {
-                        const btn = el.querySelector('button');
-                        if (btn) { btn.click(); return; }
-                        el = el.parentElement;
-                    }
-                }
-            """)
-
-            time.sleep(0.5)
-
-            # Confirm unfollow in the popup dialog
+            # Wait for and click the confirmation popup
             confirm_btn = page.locator(
                 "button:has-text('Przestań obserwować'),"
                 "button:has-text('Unfollow')"
             ).first
             try:
-                confirm_btn.wait_for(state="visible", timeout=3000)
+                confirm_btn.wait_for(state="visible", timeout=2000)
                 confirm_btn.click()
-                time.sleep(0.5)
             except Exception:
-                actions_logger.warning(
-                    "Nie pojawił się dialog potwierdzenia dla @%s", username,
-                )
+                actions_logger.warning("Brak popupu potwierdzenia dla @%s", username)
 
             actions_logger.info("OK — odobserwowano @%s", username)
             return ActionResult(
-                username=username,
-                status=ActionStatus.SUCCESS,
-                message="Odobserwowano przez przeglądarkę",
-                step="browser_unfollow",
+                username=username, status=ActionStatus.SUCCESS,
+                message="Odobserwowano przez przeglądarkę", step="browser_unfollow",
             )
 
         except Exception as exc:
-            actions_logger.error(
-                "Błąd podczas odobserwowywania @%s: %s", username, exc,
-            )
+            actions_logger.error("Błąd @%s: %s", username, exc)
             return ActionResult(
-                username=username,
-                status=ActionStatus.FAILED,
-                message=str(exc),
-                step="browser_unfollow",
+                username=username, status=ActionStatus.FAILED,
+                message=str(exc), step="browser_unfollow",
             )

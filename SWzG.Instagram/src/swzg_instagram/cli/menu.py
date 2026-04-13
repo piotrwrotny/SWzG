@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from swzg_instagram.adapters.base import InstagramAdapter
+from swzg_instagram.adapters.instagrapi_adapter import CapabilityError
 from swzg_instagram.cli.display import (
     confirm_action,
     print_export_paths,
@@ -12,6 +13,7 @@ from swzg_instagram.cli.display import (
     print_results_summary,
 )
 from swzg_instagram.services.action_service import ActionService
+from swzg_instagram.services.browser_unfollow import BrowserUnfollowService
 from swzg_instagram.services.export_service import ExportService
 from swzg_instagram.utils.config import Settings
 
@@ -22,19 +24,33 @@ MENU_TEXT = """
   ║        SWzG Instagram — Menu główne          ║
   ╠══════════════════════════════════════════════╣
   ║  EKSPORT (tylko odczyt)                      ║
-  ║  1. Eksportuj obserwowanych                  ║
-  ║  2. Eksportuj obserwujących                  ║
+  ║  1. Eksportuj obserwowanych (z bio)          ║
+  ║  2. Eksportuj obserwujących (z bio)          ║
   ║  3. Eksportuj kontakty z wiadomości (DM)     ║
   ║  4. Eksportuj konta z pliku wejściowego      ║
   ╠══════════════════════════════════════════════╣
+  ║  SZYBKI EKSPORT (bez bio — sekundy)          ║
+  ║  11. Eksportuj obserwowanych (bez bio)       ║
+  ║  12. Eksportuj obserwujących (bez bio)       ║
+  ║  19. Eksportuj obserwowanych PRÓBNIE (10)    ║
+  ╠══════════════════════════════════════════════╣
   ║  AKCJE (destrukcyjne)                        ║
-  ║  5. Przestań obserwować (z pliku)            ║
+  ║  5. Przestań obserwować (z pliku — API)      ║
   ║  6. Softblock (z pliku)                      ║
   ║  7. Usuń czaty (z pliku)                     ║
+  ╠══════════════════════════════════════════════╣
+  ║  PRZEGLĄDARKA                                ║
+  ║  8. Przestań obserwować (przeglądarka)       ║
   ╠══════════════════════════════════════════════╣
   ║  0. Wyjście                                  ║
   ╚══════════════════════════════════════════════╝
 """
+
+
+def _check_session(adapter: InstagramAdapter) -> bool:
+    if not adapter.check_session():
+        adapter.request_new_session()
+    return True
 
 
 def _select_input_file(inputs_dir: Path) -> Path | None:
@@ -63,6 +79,7 @@ def run_menu(adapter: InstagramAdapter, settings: Settings) -> None:
     export_svc = ExportService(
         adapter=adapter,
         outputs_dir=settings.outputs_dir,
+        state_dir=settings.state_dir,
         min_delay=settings.min_delay,
         max_delay=settings.max_delay,
     )
@@ -83,21 +100,43 @@ def run_menu(adapter: InstagramAdapter, settings: Settings) -> None:
                 break
 
             elif choice == "1":
-                print_header("Eksport obserwowanych")
-                paths = export_svc.export_following()
+                _check_session(adapter)
+                print_header("Eksport obserwowanych (z bio)")
+                paths = export_svc.export_following(enrich=True)
+                print_export_paths(paths)
+
+            elif choice == "11":
+                _check_session(adapter)
+                print_header("Szybki eksport obserwowanych (bez bio)")
+                paths = export_svc.export_following(enrich=False)
+                print_export_paths(paths)
+
+            elif choice == "19":
+                _check_session(adapter)
+                print_header("Eksport obserwowanych — PRÓBNIE (10 kont)")
+                paths = export_svc.export_following(enrich=True, limit=10)
                 print_export_paths(paths)
 
             elif choice == "2":
-                print_header("Eksport obserwujących")
-                paths = export_svc.export_followers()
+                _check_session(adapter)
+                print_header("Eksport obserwujących (z bio)")
+                paths = export_svc.export_followers(enrich=True)
+                print_export_paths(paths)
+
+            elif choice == "12":
+                _check_session(adapter)
+                print_header("Szybki eksport obserwujących (bez bio)")
+                paths = export_svc.export_followers(enrich=False)
                 print_export_paths(paths)
 
             elif choice == "3":
+                _check_session(adapter)
                 print_header("Eksport kontaktów DM")
                 paths = export_svc.export_dm_contacts()
                 print_export_paths(paths)
 
             elif choice == "4":
+                _check_session(adapter)
                 print_header("Eksport kont z pliku")
                 file_path = _select_input_file(settings.inputs_dir)
                 if file_path:
@@ -105,6 +144,7 @@ def run_menu(adapter: InstagramAdapter, settings: Settings) -> None:
                     print_export_paths(paths)
 
             elif choice == "5":
+                _check_session(adapter)
                 print_header("Przestań obserwować")
                 usernames = action_svc.plan_unfollow()
                 if not usernames:
@@ -118,6 +158,7 @@ def run_menu(adapter: InstagramAdapter, settings: Settings) -> None:
                     print("  Anulowano.")
 
             elif choice == "6":
+                _check_session(adapter)
                 print_header("Softblock")
                 usernames = action_svc.plan_softblock()
                 if not usernames:
@@ -131,6 +172,7 @@ def run_menu(adapter: InstagramAdapter, settings: Settings) -> None:
                     print("  Anulowano.")
 
             elif choice == "7":
+                _check_session(adapter)
                 print_header("Usuwanie czatów")
                 usernames = action_svc.plan_delete_chats()
                 if not usernames:
@@ -143,6 +185,26 @@ def run_menu(adapter: InstagramAdapter, settings: Settings) -> None:
                 else:
                     print("  Anulowano.")
 
+            elif choice == "8":
+                print_header("Odobserwowywanie przez przeglądarkę")
+                browser_svc = BrowserUnfollowService(
+                    inputs_dir=settings.inputs_dir,
+                    state_dir=settings.state_dir,
+                    instagram_username=settings.instagram_username,
+                    min_delay=settings.min_delay,
+                    max_delay=settings.max_delay,
+                )
+                usernames = browser_svc.plan()
+                if not usernames:
+                    print("  Brak kont w pliku unfollow_targets.txt")
+                    continue
+                print_preview(usernames, "Odobserwowywanie (przeglądarka)")
+                if confirm_action("Odobserwowywanie przez przeglądarkę"):
+                    results = browser_svc.run(usernames)
+                    print_results_summary(results)
+                else:
+                    print("  Anulowano.")
+
             else:
                 print("  Nieprawidłowa opcja. Spróbuj ponownie.")
 
@@ -150,5 +212,13 @@ def run_menu(adapter: InstagramAdapter, settings: Settings) -> None:
             print("\n\n  Przerwano przez użytkownika.")
             break
         except Exception as exc:
-            logger.error("Unexpected error: %s", exc, exc_info=True)
-            print(f"\n  [BŁĄD] {exc}")
+            exc_name = type(exc).__name__
+            if "PleaseWaitFewMinutes" in exc_name or "429" in str(exc):
+                logger.warning("Rate limited: %s", exc)
+                print(
+                    "\n  ⏳ Instagram wymaga odczekania — za dużo zapytań."
+                    "\n  Poczekaj kilka minut i spróbuj ponownie."
+                )
+            else:
+                logger.error("Unexpected error: %s", exc, exc_info=True)
+                print(f"\n  [BŁĄD] {exc}")

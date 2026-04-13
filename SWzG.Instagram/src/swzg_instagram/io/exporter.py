@@ -14,7 +14,6 @@ POLISH_HEADERS = {
     "bio": "Bio",
     "profile_url": "URL profilu",
     "has_chat_history": "Historia czatów",
-    "chat_count": "Liczba wiadomości",
     "last_chat_date": "Data ostatniego czatu",
     "source_list": "Lista źródłowa",
 }
@@ -36,6 +35,7 @@ def export_accounts(
 
     csv_path = output_dir / f"{prefix}_{ts}.csv"
     txt_table_path = output_dir / f"{prefix}_{ts}_tabela.txt"
+    md_path = output_dir / f"{prefix}_{ts}.md"
     txt_usernames_path = output_dir / f"{prefix}_{ts}_nazwy.txt"
 
     rows = [a.to_export_dict() for a in accounts]
@@ -54,6 +54,10 @@ def export_accounts(
     table_str = tabulate(table_data, headers=polish_cols, tablefmt="grid")
     txt_table_path.write_text(table_str + "\n", encoding="utf-8")
 
+    # Markdown table
+    md_table_str = tabulate(table_data, headers=polish_cols, tablefmt="github")
+    md_path.write_text(md_table_str + "\n", encoding="utf-8")
+
     # Usernames only
     usernames = [a.username for a in accounts]
     txt_usernames_path.write_text("\n".join(usernames) + "\n", encoding="utf-8")
@@ -61,5 +65,6 @@ def export_accounts(
     return {
         "csv": csv_path,
         "table": txt_table_path,
+        "md": md_path,
         "usernames": txt_usernames_path,
     }

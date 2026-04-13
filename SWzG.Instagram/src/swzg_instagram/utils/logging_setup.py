@@ -26,9 +26,9 @@ def setup_logging(
     # Clear existing handlers to avoid duplication
     root.handlers.clear()
 
-    # Console handler
+    # Console handler — show INFO so user sees progress
     console = logging.StreamHandler(sys.stderr)
-    console.setLevel(logging.WARNING)
+    console.setLevel(logging.INFO)
     console.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
     root.addHandler(console)
 

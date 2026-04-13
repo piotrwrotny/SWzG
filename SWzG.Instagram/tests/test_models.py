@@ -36,7 +36,6 @@ class TestAccountInfo:
             full_name="Alice",
             bio="hi",
             has_chat_history=True,
-            chat_count=10,
             last_chat_date="2025-01-01",
             source_list="following",
         )
@@ -44,7 +43,6 @@ class TestAccountInfo:
         assert d["username"] == "alice"
         assert d["full_name"] == "Alice"
         assert d["has_chat_history"] == "tak"
-        assert d["chat_count"] == "10"
         assert d["profile_url"] == "https://www.instagram.com/alice/"
 
     def test_to_export_dict_missing_values(self) -> None:
